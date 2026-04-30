@@ -1,126 +1,188 @@
 import sys
-from eprint import eprint
 import socket
 import struct
+import logging
+from typing import Any, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 class Connection:
-    def connect(self):
+    def __enter__(self) -> 'Connection':
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def connect(self) -> bool:
         return True
 
-    def send(self, data):
-        raise ConnectionError()
+    def send(self, data: bytes) -> None:
+        raise ConnectionError("send not implemented")
 
-    def recv(self, size):
-        raise ConnectionError()
+    def recv(self, size: int) -> Union[bytearray, bytes]:
+        raise ConnectionError("recv not implemented")
 
-    def close(self):
+    def close(self) -> None:
         pass
 
-    def unpack(self, fmt):
+    def unpack(self, fmt: str) -> Any:
         size = struct.calcsize(fmt)
         data = self.recv(size)
         values = struct.unpack(fmt, data)
         if len(values) == 1:
-            values = values[0]
+            return values[0]
         return values
 
-    def pack(self, fmt, *values):
+    def pack(self, fmt: str, *values: Any) -> None:
         data = struct.pack(fmt, *values)
         self.send(data)
 
-
 class StdioConnection(Connection):
-    def send(self, data):
-        sys.stdout.buffer.write(data)
-        sys.stdout.buffer.flush()
+    def send(self, data: bytes) -> None:
+        try:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        except Exception as e:
+            raise ConnectionError(f"Stdio send failed: {e}") from e
 
-    def recv(self, n):
+    def recv(self, n: int) -> bytearray:
         buff = bytearray(n)
         pos = 0
         while pos < n:
-            cr = sys.stdin.buffer.readinto(memoryview(buff)[pos:])
+            try:
+                cr = sys.stdin.buffer.readinto(memoryview(buff)[pos:])
+            except Exception as e:
+                raise ConnectionError(f"Stdio recv failed: {e}") from e
+            
             if cr == 0:
-                raise ConnectionError()
+                raise ConnectionError("Stdio stream closed unexpectedly.")
             pos += cr
         return buff
 
-    def close(self):
+    def close(self) -> None:
         sys.stdout.close()
         sys.stdin.close()
 
 class TcpServer(Connection):
-    def __init__(self, host = '0.0.0.0', port=50000):
-
+    def __init__(self, host: str = '0.0.0.0', port: int = 50000):
         try:
             self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        except socket.error:
-            raise Exception('Failed to create socket')
+            self.s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        except socket.error as e:
+            logger.error(f"Failed to create socket: {e}")
+            raise Exception(f"Failed to create socket: {e}") from e
 
         self.s.bind((host, port))
         self.s.listen()
-        self.conn = None
-        self.port = self.s.getsockname()[1]
+        self.conn: Optional[socket.socket] = None
+        self.port: int = self.s.getsockname()[1]
 
-    def connect(self):
-        self.conn, _ = self.s.accept()
-        return True
+    def connect(self) -> bool:
+        try:
+            self.conn, _ = self.s.accept()
+            return True
+        except socket.error as e:
+            logger.error(f"Failed to accept connection: {e}")
+            return False
 
-    def recv(self, n):
+    def recv(self, n: int) -> bytearray:
+        if not self.conn:
+            raise ConnectionError("Not connected")
         buff = bytearray(n)
         pos = 0
         while pos < n:
-            cr = self.conn.recv_into(memoryview(buff)[pos:])
+            try:
+                cr = self.conn.recv_into(memoryview(buff)[pos:])
+            except socket.error as e:
+                raise ConnectionError(f"TcpServer recv failed: {e}") from e
+                
             if cr == 0:
-                raise ConnectionError()
+                raise ConnectionError("TcpServer stream closed unexpectedly.")
             pos += cr
         return buff
 
-    def send(self, data):
-        self.conn.sendall(data)
+    def send(self, data: bytes) -> None:
+        if not self.conn:
+            raise ConnectionError("Not connected")
+        try:
+            self.conn.sendall(data)
+        except socket.error as e:
+            raise ConnectionError(f"TcpServer send failed: {e}") from e
 
-    def close(self):
-        self.conn.close()
+    def close(self) -> None:
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+        if self.s:
+            self.s.close()
 
 class TcpClientConnection(Connection):
-    def __init__(self, host=None, port=50000):
-        self.host = host
-        self.port = port
+    def __init__(self, host: str, port: int = 50000):
+        self.host: str = host
+        self.port: int = port
+        self.s: Optional[socket.socket] = None
 
-    def connect(self):
-        self.s = socket.socket()  # instantiate
-        self.s.connect((self.host, self.port))  # connect to the server
+    def connect(self) -> bool:
+        try:
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.s.connect((self.host, self.port))
+            return True
+        except socket.error as e:
+            logger.error(f"Failed to connect to {self.host}:{self.port}: {e}")
+            if self.s:
+                self.s.close()
+            return False
 
-        return True
+    def send(self, data: bytes) -> None:
+        if not self.s:
+            raise ConnectionError("Not connected")
+        try:
+            self.s.sendall(data)
+        except socket.error as e:
+            raise ConnectionError(f"TcpClient send failed: {e}") from e
 
-    def send(self, data):
-        self.s.sendall(data)
-
-    def recv(self, n):
+    def recv(self, n: int) -> bytearray:
+        if not self.s:
+            raise ConnectionError("Not connected")
         buff = bytearray(n)
         pos = 0
         while pos < n:
-            cr = self.s.recv_into(memoryview(buff)[pos:])
+            try:
+                cr = self.s.recv_into(memoryview(buff)[pos:])
+            except socket.error as e:
+                raise ConnectionError(f"TcpClient recv failed: {e}") from e
+                
             if cr == 0:
-                eprint("tcp client recv 0 error")
-                raise ConnectionError()
+                logger.error("tcp client recv 0 error")
+                raise ConnectionError("TcpClient stream closed unexpectedly.")
             pos += cr
         return buff
 
-    def close(self):
-        self.conn.close()
+    def close(self) -> None:
+        if self.s:
+            self.s.close()
+            self.s = None
+
 class SubprocessConnection(Connection):
-    def __init__(self, p):
-        super(SubprocessConnection, self).__init__()
+    def __init__(self, p: Any):
+        super().__init__()
         self.p = p
 
-    def send(self, data):
-        l = self.p.stdin.write(data)
-        if l != len(data):
-            raise ConnectionError()
-        self.p.stdin.flush()
+    def send(self, data: bytes) -> None:
+        try:
+            l = self.p.stdin.write(data)
+            if l != len(data):
+                raise ConnectionError("Incomplete subprocess write")
+            self.p.stdin.flush()
+        except Exception as e:
+            raise ConnectionError(f"Subprocess send failed: {e}") from e
 
-    def recv(self, n):
-        data = self.p.stdout.read(n)
-        if len(data) != n:
-            raise ConnectionError()
-        return data
+    def recv(self, n: int) -> bytes:
+        try:
+            data = self.p.stdout.read(n)
+            if len(data) != n:
+                raise ConnectionError(f"Subprocess read short: expected {n}, got {len(data)}")
+            return data
+        except Exception as e:
+            raise ConnectionError(f"Subprocess recv failed: {e}") from e

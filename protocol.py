@@ -1,8 +1,9 @@
+from enum import IntEnum
 
-
-CMD_OPEN = 1
-CMD_READ = 2
-CMD_WRITE = 3
-CMD_GET_SIZE = 4
-CMD_GET_DISKDRIVES = 5
-CMD_CLOSE = 6
+class Command(IntEnum):
+    OPEN = 1
+    READ = 2
+    WRITE = 3
+    GET_SIZE = 4
+    GET_DISKDRIVES = 5
+    CLOSE = 6

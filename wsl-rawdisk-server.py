@@ -5,17 +5,21 @@ import win32ui
 import win32event
 import wmi
 import json
+import logging
 import win32com.shell.shell as shell
 from win32com.shell import shellcon
 
 import connections
-from eprint import eprint
 from device import Device
 from connected_device import ConnectedDevice
-from protocol import *
+from protocol import Command
 
+logger = logging.getLogger(__name__)
 
 def parse_connection(args):
+    if len(args) == 0:
+        return None, 0
+        
     if args[0] == "tcpserver":
         host = args[1]
         port = int(args[2])
@@ -31,34 +35,32 @@ def parse_connection(args):
 
     elif args[0] == "namedpipeclient":
         name = args[1]
-        print(args[:2])
         return namedpipe.NamedPipeClient(name), 2
 
     elif args[0] == "namedpipeserver":
         name = args[1]
-        full_access = bool(args[2])
+        full_access = bool(int(args[2])) if args[2].isdigit() else args[2].lower() == 'true'
         return namedpipe.NamedPipeServer(name, full_access), 3
 
     else:
         return None, 0
 
 def main():
-    # required if elevate is used
     script = os.path.abspath(sys.argv[0])
-    if script.endswith('.py'):  # normal python interpreter
+    if script.endswith('.py'):
         exe = sys.executable
         params = [script]
-    else:  # installed with pyinstaller
+    else:
         exe = script
         params = []
 
     server_conn = None
     forward_conn = None
     reconnect = False
-    debug = False
+    allow_writes = False
+    verbose = False
+    log_file = None
     processes = []
-
-    #eprint("Server started, args", sys.executable, sys.argv)
 
     i = 1
     while i < len(sys.argv):
@@ -66,36 +68,58 @@ def main():
         if new_conn:
             server_conn = new_conn
             i += consumed_args
-
+            
         elif sys.argv[i] == "reconnect":
             reconnect = True
             i += 1
-
-        elif sys.argv[i] == "debug":
-            debug = True
+            
+        elif sys.argv[i] in ["debug", "-v", "--verbose"]:
+            verbose = True
             i += 1
-
+            
+        elif sys.argv[i] == "--allow-writes":
+            allow_writes = True
+            i += 1
+            
+        elif sys.argv[i] == "--log-file":
+            i += 1
+            if i < len(sys.argv) and not sys.argv[i].startswith("-") and sys.argv[i] not in ["forward", "elevate", "echo", "message", "tcpserver", "tcpclient", "stdiopipe", "namedpipeclient", "namedpipeserver", "reconnect"]:
+                log_file = sys.argv[i]
+                i += 1
+            else:
+                log_file = os.path.join(os.environ.get("LOCALAPPDATA", ""), "wsl-rawdisk", "server.log")
+                
         elif sys.argv[i] == "forward":
             new_conn, consumed_args = parse_connection(sys.argv[i+1:])
             forward_conn = new_conn
             i += consumed_args + 1
-
+            
         elif sys.argv[i] == "elevate":
             params += sys.argv[i+1:]
             p = shell.ShellExecuteEx(lpVerb='runas', lpFile=exe, lpParameters=' '.join(params), fMask=shellcon.SEE_MASK_NOCLOSEPROCESS)
             i = len(sys.argv)
             processes.append(p)
-
+            
         elif sys.argv[i] == "echo":
             print(sys.argv[i+1], flush=True)
             i += 2
-
+            
         elif sys.argv[i] == "message":
             win32ui.MessageBox(sys.argv[i+1], "wsl-rawdisk-server")
             i += 2
-
+            
         else:
             raise Exception("Unknown command " + sys.argv[i])
+
+    log_level = logging.DEBUG if verbose else logging.INFO
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if log_file:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
 
     if forward_conn is not None:
         assert forward_conn.connect()
@@ -105,19 +129,19 @@ def main():
             devices = []
             if not server_conn.connect():
                 break
-            if debug:
-                eprint("connected")
+                
+            logger.debug("connected")
 
             while True:
                 try:
                     command = server_conn.unpack("B")
-                    if command == CMD_OPEN:  # open
+                    if command == Command.OPEN:
                         size = server_conn.unpack("H")
                         device_name = server_conn.recv(size).decode('utf-8')
-                        if debug:
-                            eprint("recv cmd open", device_name)
+                        logger.debug(f"recv cmd open {device_name}")
+                        
                         if forward_conn is None:
-                            device = Device(device_name)
+                            device = Device(device_name, read_only=not allow_writes)
                         else:
                             device = ConnectedDevice(forward_conn, device_name)
 
@@ -127,13 +151,12 @@ def main():
                         else:
                             server_conn.pack("h", -1)
 
-                    elif command == CMD_READ:  # read
+                    elif command == Command.READ:
                         index, pos, size = server_conn.unpack("=H2Q")
-                        # eprint("read", index, pos, size)
                         if index < len(devices):
                             data = devices[index].read(pos, size)
                         else:
-                            eprint("index out of range")
+                            logger.error("index out of range")
                             data = None
 
                         if data is None:
@@ -142,9 +165,8 @@ def main():
                             server_conn.pack("B", 0)
                             server_conn.send(data)
 
-                    elif command == CMD_WRITE:  # write
+                    elif command == Command.WRITE:
                         index, pos, size = server_conn.unpack("=H2Q")
-                        # eprint("write", index, pos, size)
                         data = server_conn.recv(size)
                         assert len(data) == size
                         if index < len(devices):
@@ -154,29 +176,30 @@ def main():
 
                         server_conn.pack("B", 0 if res else 1)
 
-                    elif command == CMD_GET_SIZE:
+                    elif command == Command.GET_SIZE:
                         index = server_conn.unpack("H")
                         if index < len(devices):
                             server_conn.pack("Q", devices[index].size)
                         else:
-                            eprint("index out of range")
+                            logger.error("index out of range")
                             server_conn.pack("Q", 0)
 
-                    elif command == CMD_GET_DISKDRIVES:
+                    elif command == Command.GET_DISKDRIVES:
                         drives = [disk.Name for disk in wmi.WMI().query("SELECT * from Win32_DiskDrive")]
-                        drives = json.dumps(drives).encode("utf-8")
-                        server_conn.pack("I", len(drives))
-                        server_conn.send(drives)
+                        drives_bytes = json.dumps(drives).encode("utf-8")
+                        server_conn.pack("I", len(drives_bytes))
+                        server_conn.send(drives_bytes)
 
-                    elif command == CMD_CLOSE:
+                    elif command == Command.CLOSE:
                         if forward_conn is not None:
-                            forward_conn.pack("b", CMD_CLOSE)
+                            forward_conn.pack("b", Command.CLOSE)
                         break
 
                     else:
-                        eprint("unknown command", command)
+                        logger.error(f"unknown command {command}")
 
                 except ConnectionError as e:
+                    logger.debug(f"Connection error/closed: {e}")
                     break
 
             for d in devices:
