@@ -1,4 +1,3 @@
-import sys
 import socket
 import struct
 import logging
@@ -38,31 +37,6 @@ class Connection:
         data = struct.pack(fmt, *values)
         self.send(data)
 
-class StdioConnection(Connection):
-    def send(self, data: bytes) -> None:
-        try:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-        except Exception as e:
-            raise ConnectionError(f"Stdio send failed: {e}") from e
-
-    def recv(self, n: int) -> bytearray:
-        buff = bytearray(n)
-        pos = 0
-        while pos < n:
-            try:
-                cr = sys.stdin.buffer.readinto(memoryview(buff)[pos:])
-            except Exception as e:
-                raise ConnectionError(f"Stdio recv failed: {e}") from e
-            
-            if cr == 0:
-                raise ConnectionError("Stdio stream closed unexpectedly.")
-            pos += cr
-        return buff
-
-    def close(self) -> None:
-        sys.stdout.close()
-        sys.stdin.close()
 
 class TcpServer(Connection):
     def __init__(self, host: str = '0.0.0.0', port: int = 50000):
@@ -117,6 +91,7 @@ class TcpServer(Connection):
         if self.s:
             self.s.close()
 
+
 class TcpClientConnection(Connection):
     def __init__(self, host: str, port: int = 50000):
         self.host: str = host
@@ -163,26 +138,3 @@ class TcpClientConnection(Connection):
         if self.s:
             self.s.close()
             self.s = None
-
-class SubprocessConnection(Connection):
-    def __init__(self, p: Any):
-        super().__init__()
-        self.p = p
-
-    def send(self, data: bytes) -> None:
-        try:
-            l = self.p.stdin.write(data)
-            if l != len(data):
-                raise ConnectionError("Incomplete subprocess write")
-            self.p.stdin.flush()
-        except Exception as e:
-            raise ConnectionError(f"Subprocess send failed: {e}") from e
-
-    def recv(self, n: int) -> bytes:
-        try:
-            data = self.p.stdout.read(n)
-            if len(data) != n:
-                raise ConnectionError(f"Subprocess read short: expected {n}, got {len(data)}")
-            return data
-        except Exception as e:
-            raise ConnectionError(f"Subprocess recv failed: {e}") from e

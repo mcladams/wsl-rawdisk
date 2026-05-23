@@ -8,6 +8,8 @@ import struct
 import logging
 import pyfuse3
 import pyfuse3_asyncio
+import subprocess
+import argparse
 from typing import Dict, Any
 
 from protocol import Command
@@ -28,11 +30,12 @@ class AsyncTcpClientConnection:
         self.port = port
         self.reader = None
         self.writer = None
+        self.lock = asyncio.Lock()
 
     async def connect(self):
         self.reader, self.writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), 
-            timeout=2.0
+            timeout=6.0
         )
 
     async def send(self, data: bytes):
@@ -79,31 +82,36 @@ class AsyncConnectedDevice:
 
     async def open(self) -> bool:
         device_name_bytes = self.device_name.encode('utf-8')
-        await self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes))
-        await self.conn.send(device_name_bytes)
-        self.index = await self.conn.unpack(FMT_REPLY_SHORT)
+        async with self.conn.lock: # <--- ACQUIRE LOCK
+            await self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes))
+            await self.conn.send(device_name_bytes)
+            self.index = await self.conn.unpack(FMT_REPLY_SHORT)
+        # Call get_size OUTSIDE the lock, as get_size acquires it too
         if self.index != -1:
             self.size = await self.get_size()
         return self.index != -1
 
     async def read(self, pos: int, size: int) -> bytes:
-       await self.conn.pack(FMT_READ_WRITE, Command.READ, self.index, pos, size)
-       status = await self.conn.unpack(FMT_REPLY_BYTE)
-       if status == 0:
-           data = await self.conn.recv(size)
-       else:
-           data = b''
-       return data
+        async with self.conn.lock: # <--- ACQUIRE LOCK
+            await self.conn.pack(FMT_READ_WRITE, Command.READ, self.index, pos, size)
+            status = await self.conn.unpack(FMT_REPLY_BYTE)
+            if status == 0:
+                data = await self.conn.recv(size)
+            else:
+                data = b''
+        return data
 
     async def write(self, pos: int, data: bytes) -> bool:
-       await self.conn.pack(FMT_READ_WRITE, Command.WRITE, self.index, pos, len(data))
-       await self.conn.send(data)
-       status = await self.conn.unpack(FMT_REPLY_BYTE)
-       return status == 0
+        async with self.conn.lock: # <--- ACQUIRE LOCK
+            await self.conn.pack(FMT_READ_WRITE, Command.WRITE, self.index, pos, len(data))
+            await self.conn.send(data)
+            status = await self.conn.unpack(FMT_REPLY_BYTE)
+        return status == 0
 
     async def get_size(self) -> int:
-        await self.conn.pack(FMT_GET_SIZE, Command.GET_SIZE, self.index)
-        return await self.conn.unpack(FMT_REPLY_QWORD)
+        async with self.conn.lock: # <--- ACQUIRE LOCK
+            await self.conn.pack(FMT_GET_SIZE, Command.GET_SIZE, self.index)
+            return await self.conn.unpack(FMT_REPLY_QWORD)
 
     async def close(self) -> None:
         pass
@@ -114,10 +122,10 @@ async def loop_device_manager(devices: Dict[str, AsyncConnectedDevice], mountpoi
         logger.warning("not running as root, cannot create loop devices")
         return
 
-    while True:
-        if devices and os.path.exists(os.path.join(mountpoint, list(devices.values())[0].filename)):
-            break
-        await asyncio.sleep(0.5)
+    # [FIX] Removed synchronous os.path.exists() to prevent FUSE self-deadlock.
+    # Yield to the event loop so pyfuse3.main() can initialize.
+    logger.info("Waiting 2.0s for FUSE mount to stabilize...")
+    await asyncio.sleep(2.0)
 
     for d in devices.values():
         c = ["losetup", "-f", "--show", "-P", "--direct-io=on", os.path.join(mountpoint, d.filename)]
@@ -139,11 +147,24 @@ async def cleanup_loop_devices(devices: Dict[str, AsyncConnectedDevice]):
             await proc.wait()
 
 async def main_async():
+    parser = argparse.ArgumentParser(description="WSL RawDisk Proxy Client")
+    parser.add_argument("drive", nargs="?", help="Drive number (e.g., '2' for PHYSICALDRIVE2) or full path")
+    args = parser.parse_args()
+
     tmp_mountpoint = tempfile.TemporaryDirectory(prefix="wsl_rawdisk_")
     mountpoint = os.path.abspath(tmp_mountpoint.name)
     
-    # WSL2 Client Networking Boundary (TCP Only targeting 127.0.0.1)
-    host = "127.0.0.1"
+    def get_wsl_host_ip():
+        try:
+            result = subprocess.run(['ip', 'route'], capture_output=True, text=True)
+            for line in result.stdout.split('\n'):
+                if line.startswith('default via'):
+                    return line.split()[2]
+        except Exception as e:
+            logger.warning(f"Could not determine WSL host IP, falling back to localhost: {e}")
+        return '127.0.0.1'
+
+    host = get_wsl_host_ip()
     port = 50000
 
     conn = AsyncTcpClientConnection(host, port)
@@ -156,39 +177,67 @@ async def main_async():
         logger.error(f"Failed to connect to Windows host at {host}:{port}: {e}")
         sys.exit(1)
 
-    await conn.pack("B", Command.GET_DISKDRIVES)
-    size = await conn.unpack("I")
-    drives_bytes = await conn.recv(size)
-    drives = json.loads(drives_bytes.decode("utf-8"))
-    drives.sort()
-
-    devices = {}
-    for d in drives:
-        if not d.startswith("\\\\.\\"):
-            d = "\\\\.\\" + d
-        device = AsyncConnectedDevice(conn, d)
-        if len(d) == 5 and d.startswith("\\\\.\\"):
-            d = d + ":"
-        filename = d.replace("\\", "").replace(".", "").replace(":", "").replace("/", "").lower()
+    # 1. Fetch available drives
+    async with conn.lock:
+        await conn.pack("B", Command.GET_DISKDRIVES)
+        size = await conn.unpack("I")
+        drives_bytes = await conn.recv(size)
         
-        try:
-            # We enforce a timeout when opening the device over IPC as well
-            if await asyncio.wait_for(device.open(), timeout=2.0):
-                device.filename = filename
-                device.loop_dev = None
-                devices[filename] = device
-            else:
-                logger.error(f"opening {d} failed")
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout opening device {d}")
+    all_drives = json.loads(drives_bytes.decode("utf-8"))
+    all_drives.sort()
+
+    # 2. If no drive specified, print the menu and exit
+    if not args.drive:
+        print("\nAvailable Windows Physical Drives:")
+        print("----------------------------------")
+        for d in all_drives:
+            # Extract just the number for easy reading
+            num = d.replace("\\\\.\\PHYSICALDRIVE", "")
+            print(f"  [{num}] {d}")
+        print("\nTo mount a drive, run: sudo python3 wsl-rawdisk.py <number>")
+        await conn.pack("b", Command.CLOSE)
+        await conn.close()
+        sys.exit(0)
+
+    # 3. Format the requested drive
+    target_drive = args.drive
+    if target_drive.isdigit():
+        target_drive = f"\\\\.\\PHYSICALDRIVE{target_drive}"
+    elif not target_drive.startswith("\\\\.\\"):
+        target_drive = "\\\\.\\" + target_drive
+
+    if target_drive not in all_drives:
+        logger.error(f"Drive {target_drive} not found on Windows host.")
+        await conn.pack("b", Command.CLOSE)
+        await conn.close()
+        sys.exit(1)
+
+    # 4. Mount ONLY the requested drive
+    devices = {}
+    logger.info(f"Requesting mount for {target_drive}...")
+    device = AsyncConnectedDevice(conn, target_drive)
+    
+    filename = target_drive.replace("\\", "").replace(".", "").replace(":", "").lower()
+    
+    try:
+        if await asyncio.wait_for(device.open(), timeout=5.0):
+            device.filename = filename
+            device.loop_dev = None
+            devices[filename] = device
+        else:
+            logger.error(f"Opening {target_drive} failed on the Windows side.")
+            sys.exit(1)
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout opening device {target_drive}")
+        sys.exit(1)
 
     loop_task = asyncio.create_task(loop_device_manager(devices, mountpoint))
 
     pyfuse3_asyncio.enable()
     fs = FS(devices)
     options = set(pyfuse3.default_options)
-    options.add(b'fsname=wsl_rawdisk')
-    options.add(b'allow_other')
+    options.add('fsname=wsl_rawdisk')
+    options.add('allow_other')
     
     pyfuse3.init(fs, mountpoint, options)
     
@@ -197,11 +246,13 @@ async def main_async():
     except asyncio.exceptions.CancelledError:
         pass
     except KeyboardInterrupt:
-        pass
+        logger.info("Ctrl+C detected, unmounting...")
     finally:
-        pyfuse3.close()
+        logger.info("Tearing down loop devices...")
         loop_task.cancel()
         await cleanup_loop_devices(devices)
+        logger.info("Closing FUSE mount...")
+        pyfuse3.close()
         await conn.pack("b", Command.CLOSE)
         await conn.close()
 

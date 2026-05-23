@@ -77,14 +77,32 @@ class Device:
         return int.from_bytes(iRes, 'little')
 
     def read(self, pos: int, size: int) -> Optional[bytes]:
+        # 1. Catch EOF reads immediately
+        if pos >= self.size:
+            return b''
+
         offset = pos % self.sector_size
         pos -= offset
         extra = (self.sector_size - (size + offset)) % self.sector_size
         total_size = size + offset + extra
 
-        win32file.SetFilePointer(self.handle, pos, win32file.FILE_BEGIN)
+        # 2. Clamp the total_size to the physical disk boundary to prevent Error 87
+        if pos + total_size > self.size:
+            # Drop the extra padding if it pushes us off the disk
+            total_size = self.size - pos
+            # Ensure it is still sector-aligned by rounding down
+            total_size = (total_size // self.sector_size) * self.sector_size
+            if total_size == 0:
+                return b''
+
+        # 3. Native 64-bit offsets (Fixes 32-bit SetFilePointer truncation)
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.Offset = pos & 0xFFFFFFFF
+        overlapped.OffsetHigh = pos >> 32
+        # OLD behavior: win32file.SetFilePointer(self.handle, pos, win32file.FILE_BEGIN)
         try:
-            res, data = win32file.ReadFile(self.handle, total_size, None)
+            # Pass the overlapped struct directly to ReadFile
+            res, data = win32file.ReadFile(self.handle, total_size, overlapped)
         except pywintypes.error as e:
             logger.error(f"Read error at pos {pos}: {e}")
             return None
@@ -96,6 +114,7 @@ class Device:
         if len(data) != total_size:
             logger.error(f"Read {total_size - len(data)} less bytes than requested...")
             return None
+            
         return data[offset:offset + size]
 
     def write(self, pos: int, data: bytes) -> bool:
@@ -106,12 +125,17 @@ class Device:
         offset = pos % self.sector_size
         assert offset == 0
         pos -= offset
+        
+        overlapped = pywintypes.OVERLAPPED()
+        overlapped.Offset = pos & 0xFFFFFFFF
+        overlapped.OffsetHigh = pos >> 32
 
-        win32file.SetFilePointer(self.handle, pos, win32file.FILE_BEGIN)
+        # OLD behaviour: win32file.SetFilePointer(self.handle, pos, win32file.FILE_BEGIN)
         try:
-            res = win32file.WriteFile(self.handle, data)
-            if res != (0, len(data)):
-                logger.error(f"Write failed: {res}")
+            res = win32file.WriteFile(self.handle, data, overlapped)
+            # WriteFile with OVERLAPPED returns a tuple: (error_code, bytes_written)
+            if res[0] != 0 or res[1] != len(data):
+                logger.error(f"Write failed: code {res[0]}, bytes {res[1]}")
                 return False
         except pywintypes.error as e:
             logger.error(f"Write API failed at pos {pos}, len {len(data)}: {e}")

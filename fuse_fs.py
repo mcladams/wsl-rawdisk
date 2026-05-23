@@ -93,12 +93,15 @@ class FS(pyfuse3.Operations):
         return pyfuse3.FileInfo(fh=self.fd)
 
     async def read(self, inode, off, size):
+        if inode == pyfuse3.ROOT_INODE:
+            raise pyfuse3.FUSEError(errno.EISDIR) # Safeguard against directory reads
+
         path = self.inode_map[inode]
         name = path[1:]
         device = self.devices[name]
         
         try:
-            data = await asyncio.wait_for(device.read(off, size), timeout=5.0)
+            data = await asyncio.wait_for(device.read(off, size), timeout=15.0)
             if data is None:
                 raise pyfuse3.FUSEError(errno.EIO)
             return bytes(data)
@@ -113,12 +116,15 @@ class FS(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.EIO)
 
     async def write(self, inode, off, buf):
+        if inode == pyfuse3.ROOT_INODE:
+            raise pyfuse3.FUSEError(errno.EISDIR) # Safeguard against directory reads
+
         path = self.inode_map[inode]
         name = path[1:]
         device = self.devices[name]
         
         try:
-            success = await asyncio.wait_for(device.write(off, buf), timeout=5.0)
+            success = await asyncio.wait_for(device.write(off, buf), timeout=15.0)
             if success:
                 return len(buf)
             else:

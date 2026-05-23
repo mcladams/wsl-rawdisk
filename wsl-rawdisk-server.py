@@ -1,11 +1,10 @@
 import sys
-import namedpipe
 import os
 import win32ui
 import win32event
-import wmi
 import json
 import logging
+import wmi  # type: ignore
 import win32com.shell.shell as shell
 from win32com.shell import shellcon
 
@@ -29,18 +28,6 @@ def parse_connection(args):
         host = args[1]
         port = int(args[2])
         return connections.TcpClientConnection(host, port), 3
-
-    elif args[0] == "stdiopipe":
-        return connections.StdioConnection(), 1
-
-    elif args[0] == "namedpipeclient":
-        name = args[1]
-        return namedpipe.NamedPipeClient(name), 2
-
-    elif args[0] == "namedpipeserver":
-        name = args[1]
-        full_access = bool(int(args[2])) if args[2].isdigit() else args[2].lower() == 'true'
-        return namedpipe.NamedPipeServer(name, full_access), 3
 
     else:
         return None, 0
