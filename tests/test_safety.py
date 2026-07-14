@@ -5,8 +5,7 @@ import struct
 import importlib
 import time
 
-# Load the hyphenated server module
-wsl_rawdisk_server = importlib.import_module("wsl-rawdisk-server")
+from wsl_rawdisk.server import __main__ as wsl_rawdisk_server
 
 def make_open_request(device_name: str, write_intent: bool) -> bytes:
     name_bytes = device_name.encode('utf-8')

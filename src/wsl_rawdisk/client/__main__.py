@@ -12,7 +12,7 @@ import subprocess
 import argparse
 from typing import Dict, Any
 
-from protocol import (
+from wsl_rawdisk.protocol import (
     Command,
     FMT_OPEN,
     FMT_READ_WRITE,
@@ -21,7 +21,7 @@ from protocol import (
     FMT_REPLY_SHORT,
     FMT_REPLY_QWORD
 )
-from fuse_fs import FS
+from wsl_rawdisk.client.fuse_fs import FS
 
 logger = logging.getLogger(__name__)
 

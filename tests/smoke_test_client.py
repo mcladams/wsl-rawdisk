@@ -45,7 +45,7 @@ def run_full_stack_smoke_test(host):
     # Run wsl-rawdisk.py as a background subprocess using sudo
     # Since we run with sudo, make sure python is run with buffering disabled (-u)
     proc = subprocess.Popen(
-        ["python3", "-u", "wsl-rawdisk.py", "99", "--allow-writes"],
+        ["python3", "-u", "-m", "wsl_rawdisk.client", "99", "--allow-writes"],
         stdout=None,
         stderr=None,
         text=True

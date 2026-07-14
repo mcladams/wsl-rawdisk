@@ -7,8 +7,8 @@ import win32file
 from typing import Dict, Any
 
 # Ensure we import device before mocking
-import device
-from device import Device
+from wsl_rawdisk.server import device
+from wsl_rawdisk.server.device import Device
 
 # 1. Create a dummy test image file (1MB) with a unique pattern
 IMAGE_PATH = os.path.abspath("test_device.img")
@@ -51,7 +51,7 @@ Device.get_geometry = lambda self: {"BytesPerSector": 512}
 Device.get_size = lambda self: 1024 * 1024
 
 # 3. Load the server module and monkey-patch it
-wsl_rawdisk_server = importlib.import_module("wsl-rawdisk-server")
+from wsl_rawdisk.server import __main__ as wsl_rawdisk_server
 
 # Mock get_boot_and_pagefile_disk_indices to cache 0 as the boot disk
 wsl_rawdisk_server.get_boot_and_pagefile_disk_indices = lambda: {0}

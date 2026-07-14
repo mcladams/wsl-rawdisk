@@ -92,49 +92,4 @@ class TcpServer(Connection):
             self.s.close()
 
 
-class TcpClientConnection(Connection):
-    def __init__(self, host: str, port: int = 50000):
-        self.host: str = host
-        self.port: int = port
-        self.s: Optional[socket.socket] = None
 
-    def connect(self) -> bool:
-        try:
-            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.s.connect((self.host, self.port))
-            return True
-        except socket.error as e:
-            logger.error(f"Failed to connect to {self.host}:{self.port}: {e}")
-            if self.s:
-                self.s.close()
-            return False
-
-    def send(self, data: bytes) -> None:
-        if not self.s:
-            raise ConnectionError("Not connected")
-        try:
-            self.s.sendall(data)
-        except socket.error as e:
-            raise ConnectionError(f"TcpClient send failed: {e}") from e
-
-    def recv(self, n: int) -> bytearray:
-        if not self.s:
-            raise ConnectionError("Not connected")
-        buff = bytearray(n)
-        pos = 0
-        while pos < n:
-            try:
-                cr = self.s.recv_into(memoryview(buff)[pos:])
-            except socket.error as e:
-                raise ConnectionError(f"TcpClient recv failed: {e}") from e
-                
-            if cr == 0:
-                logger.error("tcp client recv 0 error")
-                raise ConnectionError("TcpClient stream closed unexpectedly.")
-            pos += cr
-        return buff
-
-    def close(self) -> None:
-        if self.s:
-            self.s.close()
-            self.s = None

@@ -16,10 +16,10 @@ import winioctlcon
 import struct
 import pywintypes
 
-import connections
-from device import Device
-from connected_device import ConnectedDevice
-from protocol import (
+from wsl_rawdisk.common import connections
+from wsl_rawdisk.server.device import Device
+from wsl_rawdisk.client.connected_device import ConnectedDevice
+from wsl_rawdisk.protocol import (
     Command,
     FMT_OPEN,
     FMT_OPEN_POST_CMD,
@@ -140,11 +140,6 @@ def parse_connection(args):
             logger.warning("Binding to 0.0.0.0 (all interfaces) because --bind-any is enabled. This may expose the disk proxy to the local network!")
             
         return connections.TcpServer(host, port), 3
-
-    elif args[0] == "tcpclient":
-        host = args[1]
-        port = int(args[2])
-        return connections.TcpClientConnection(host, port), 3
 
     else:
         return None, 0

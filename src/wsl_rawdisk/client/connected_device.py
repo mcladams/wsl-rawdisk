@@ -1,4 +1,4 @@
-from protocol import (
+from wsl_rawdisk.protocol import (
     Command,
     FMT_OPEN,
     FMT_READ_WRITE,
