@@ -7,7 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 server = ["pywin32", "wmi"]
-client = ["pyfuse3", "pyfuse3-asyncio"]
+client = ["pyfuse3"]
 dev = ["pytest", "pyinstaller"]
 
 [project.scripts]

@@ -296,7 +296,7 @@ class TestSafetyArchitecture(unittest.TestCase):
             res_idx = struct.unpack("h", mock_conn.sent_data[0:2])[0]
             self.assertEqual(res_idx, -1)
 
-    @patch('connections.socket.socket')
+    @patch('wsl_rawdisk.common.connections.socket.socket')
     def test_tcpserver_bind_ip_handling(self, mock_socket_class):
         mock_socket = MagicMock()
         mock_socket_class.return_value = mock_socket
