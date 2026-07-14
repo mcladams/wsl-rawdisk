@@ -1,12 +1,13 @@
-from protocol import Command
+from protocol import (
+    Command,
+    FMT_OPEN,
+    FMT_READ_WRITE,
+    FMT_GET_SIZE,
+    FMT_REPLY_BYTE,
+    FMT_REPLY_SHORT,
+    FMT_REPLY_QWORD
+)
 from typing import Any
-
-FMT_OPEN = "=BH"
-FMT_READ_WRITE = "=BH2Q"
-FMT_GET_SIZE = "=BH"
-FMT_REPLY_BYTE = "B"
-FMT_REPLY_SHORT = "h"
-FMT_REPLY_QWORD = "Q"
 
 class ConnectedDevice:
     def __init__(self, conn: Any, device_name: str):
@@ -17,9 +18,9 @@ class ConnectedDevice:
         self.filename: str = ""
         self.loop_dev: Any = None
 
-    def open(self) -> bool:
+    def open(self, write_intent: bool = False) -> bool:
         device_name_bytes = self.device_name.encode('utf-8')
-        self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes))
+        self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes), 1 if write_intent else 0)
         self.conn.send(device_name_bytes)
         self.index = self.conn.unpack(FMT_REPLY_SHORT)
         if self.index != -1:

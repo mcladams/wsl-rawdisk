@@ -12,17 +12,18 @@ import subprocess
 import argparse
 from typing import Dict, Any
 
-from protocol import Command
+from protocol import (
+    Command,
+    FMT_OPEN,
+    FMT_READ_WRITE,
+    FMT_GET_SIZE,
+    FMT_REPLY_BYTE,
+    FMT_REPLY_SHORT,
+    FMT_REPLY_QWORD
+)
 from fuse_fs import FS
 
 logger = logging.getLogger(__name__)
-
-FMT_OPEN = "=BH"
-FMT_READ_WRITE = "=BH2Q"
-FMT_GET_SIZE = "=BH"
-FMT_REPLY_BYTE = "B"
-FMT_REPLY_SHORT = "h"
-FMT_REPLY_QWORD = "Q"
 
 class AsyncTcpClientConnection:
     def __init__(self, host: str, port: int):
@@ -80,10 +81,10 @@ class AsyncConnectedDevice:
         self.filename = ""
         self.loop_dev = None
 
-    async def open(self) -> bool:
+    async def open(self, write_intent: bool = False) -> bool:
         device_name_bytes = self.device_name.encode('utf-8')
         async with self.conn.lock: # <--- ACQUIRE LOCK
-            await self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes))
+            await self.conn.pack(FMT_OPEN, Command.OPEN, len(device_name_bytes), 1 if write_intent else 0)
             await self.conn.send(device_name_bytes)
             self.index = await self.conn.unpack(FMT_REPLY_SHORT)
         # Call get_size OUTSIDE the lock, as get_size acquires it too
@@ -145,11 +146,16 @@ async def cleanup_loop_devices(devices: Dict[str, AsyncConnectedDevice]):
             c = ["losetup", "-d", d.loop_dev]
             proc = await asyncio.create_subprocess_exec(*c)
             await proc.wait()
-
 async def main_async():
     parser = argparse.ArgumentParser(description="WSL RawDisk Proxy Client")
     parser.add_argument("drive", nargs="?", help="Drive number (e.g., '2' for PHYSICALDRIVE2) or full path")
+    parser.add_argument("--allow-writes", action="store_true", help="Request write access to the drive")
+    parser.add_argument("--read-only", action="store_true", help="Request read-only access (default)")
     args = parser.parse_args()
+
+    write_intent = False
+    if args.allow_writes and not args.read_only:
+        write_intent = True
 
     tmp_mountpoint = tempfile.TemporaryDirectory(prefix="wsl_rawdisk_")
     mountpoint = os.path.abspath(tmp_mountpoint.name)
@@ -220,7 +226,7 @@ async def main_async():
     filename = target_drive.replace("\\", "").replace(".", "").replace(":", "").lower()
     
     try:
-        if await asyncio.wait_for(device.open(), timeout=5.0):
+        if await asyncio.wait_for(device.open(write_intent=write_intent), timeout=5.0):
             device.filename = filename
             device.loop_dev = None
             devices[filename] = device
