@@ -25,6 +25,7 @@ class FS(pyfuse3.Operations):
             self.next_inode += 1
 
     async def getattr(self, inode, ctx=None):
+        logger.info(f"getattr called for inode {inode}")
         if inode not in self.inode_map:
             raise pyfuse3.FUSEError(errno.ENOENT)
         
@@ -58,6 +59,7 @@ class FS(pyfuse3.Operations):
 
     async def lookup(self, parent_inode, name, ctx=None):
         name_str = name.decode('utf-8')
+        logger.info(f"lookup called for parent {parent_inode}, name {name_str}")
         if parent_inode != pyfuse3.ROOT_INODE:
             raise pyfuse3.FUSEError(errno.ENOENT)
         
@@ -90,9 +92,14 @@ class FS(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.ENOENT)
             
         self.fd += 1
+        self.files[self.fd] = inode
         return pyfuse3.FileInfo(fh=self.fd)
 
-    async def read(self, inode, off, size):
+    async def read(self, fh, off, size):
+        logger.info(f"read called: fh={fh}, off={off}, size={size}")
+        if fh not in self.files:
+            raise pyfuse3.FUSEError(errno.EBADF)
+        inode = self.files[fh]
         if inode == pyfuse3.ROOT_INODE:
             raise pyfuse3.FUSEError(errno.EISDIR) # Safeguard against directory reads
 
@@ -115,7 +122,11 @@ class FS(pyfuse3.Operations):
             logger.error(f"Unexpected error on read: {e}")
             raise pyfuse3.FUSEError(errno.EIO)
 
-    async def write(self, inode, off, buf):
+    async def write(self, fh, off, buf):
+        logger.info(f"write called: fh={fh}, off={off}, len={len(buf)}")
+        if fh not in self.files:
+            raise pyfuse3.FUSEError(errno.EBADF)
+        inode = self.files[fh]
         if inode == pyfuse3.ROOT_INODE:
             raise pyfuse3.FUSEError(errno.EISDIR) # Safeguard against directory reads
 

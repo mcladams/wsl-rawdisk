@@ -123,7 +123,9 @@ class Device:
             return False
 
         offset = pos % self.sector_size
-        assert offset == 0
+        if offset != 0:
+            logger.error(f"Misaligned write: position {pos} is not aligned to sector size {self.sector_size}")
+            return False
         pos -= offset
         
         overlapped = pywintypes.OVERLAPPED()

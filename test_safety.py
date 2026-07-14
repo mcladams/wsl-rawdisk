@@ -264,5 +264,68 @@ class TestSafetyArchitecture(unittest.TestCase):
             res_idx = struct.unpack("h", mock_conn.sent_data[0:2])[0]
             self.assertEqual(res_idx, -1)
 
+    def test_file_path_bypass_refusal(self):
+        with patch.object(wsl_rawdisk_server, 'get_boot_and_pagefile_disk_indices') as mock_get_boot, \
+             patch.object(wsl_rawdisk_server, 'Device') as mock_device_class:
+             
+            mock_get_boot.return_value = {0}
+            mock_device_instance = MagicMock()
+            mock_device_instance.open.return_value = True
+            mock_device_class.return_value = mock_device_instance
+
+            # Client requests write-intent on a file path
+            payload = (
+                make_open_request("C:\\Windows\\System32\\notepad.exe", True) +
+                make_close_request()
+            )
+            mock_conn = MockServerConnection(payload)
+
+            def mock_parse(args):
+                if len(args) > 0 and args[0] in ("tcpserver", "tcpclient"):
+                    return mock_conn, 3
+                return None, 0
+
+            test_args = ["wsl-rawdisk-server.py", "tcpserver", "127.0.0.1", "50000", "--allow-writes"]
+            
+            with patch.object(sys, 'argv', test_args), \
+                 patch.object(wsl_rawdisk_server, 'parse_connection', side_effect=mock_parse):
+                wsl_rawdisk_server.main()
+
+            # Assert that mock_device_class is NOT called
+            mock_device_class.assert_not_called()
+            # Assert that the response index unpacked from mock_conn.sent_data[0:2] equals -1 (refused)
+            res_idx = struct.unpack("h", mock_conn.sent_data[0:2])[0]
+            self.assertEqual(res_idx, -1)
+
+    @patch('connections.socket.socket')
+    def test_tcpserver_bind_ip_handling(self, mock_socket_class):
+        mock_socket = MagicMock()
+        mock_socket_class.return_value = mock_socket
+        mock_socket.getsockname.return_value = ('mocked_ip', 50000)
+
+        # 1. 0.0.0.0 bind without --bind-any -> overrides to WSL IP
+        with patch.object(wsl_rawdisk_server, 'get_wsl_adapter_ip', return_value='172.27.48.1'), \
+             patch('sys.argv', ['wsl-rawdisk-server.py']):
+            
+            wsl_rawdisk_server.parse_connection(["tcpserver", "0.0.0.0", "50000"])
+            mock_socket.bind.assert_called_with(('172.27.48.1', 50000))
+            mock_socket.bind.reset_mock()
+
+        # 2. 0.0.0.0 bind without --bind-any when WSL IP is not found -> falls back to 127.0.0.1
+        with patch.object(wsl_rawdisk_server, 'get_wsl_adapter_ip', return_value=None), \
+             patch('sys.argv', ['wsl-rawdisk-server.py']):
+            
+            wsl_rawdisk_server.parse_connection(["tcpserver", "0.0.0.0", "50000"])
+            mock_socket.bind.assert_called_with(('127.0.0.1', 50000))
+            mock_socket.bind.reset_mock()
+
+        # 3. 0.0.0.0 bind WITH --bind-any -> binds to 0.0.0.0
+        with patch.object(wsl_rawdisk_server, 'get_wsl_adapter_ip', return_value='172.27.48.1'), \
+             patch('sys.argv', ['wsl-rawdisk-server.py', '--bind-any']):
+            
+            wsl_rawdisk_server.parse_connection(["tcpserver", "0.0.0.0", "50000"])
+            mock_socket.bind.assert_called_with(('0.0.0.0', 50000))
+            mock_socket.bind.reset_mock()
+
 if __name__ == '__main__':
     unittest.main()

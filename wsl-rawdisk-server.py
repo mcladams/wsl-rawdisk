@@ -1,5 +1,6 @@
 import sys
 import os
+import subprocess
 import win32ui
 import win32event
 import json
@@ -23,7 +24,9 @@ from protocol import (
     FMT_OPEN,
     FMT_OPEN_POST_CMD,
     FMT_READ_WRITE,
+    FMT_READ_WRITE_POST_CMD,
     FMT_GET_SIZE,
+    FMT_GET_SIZE_POST_CMD,
     FMT_REPLY_BYTE,
     FMT_REPLY_SHORT,
     FMT_REPLY_QWORD
@@ -31,14 +34,23 @@ from protocol import (
 
 logger = logging.getLogger(__name__)
 
+def get_wsl_adapter_ip() -> Optional[str]:
+    try:
+        res = subprocess.run(["netsh", "interface", "ipv4", "show", "addresses"], capture_output=True, text=True, check=True)
+        current_interface = None
+        for line in res.stdout.splitlines():
+            line_str = line.strip()
+            if line_str.startswith('Configuration for interface "'):
+                current_interface = line_str.split('"')[1]
+            elif line_str.startswith("IP Address:") and current_interface and "WSL" in current_interface:
+                return line_str.split(":")[1].strip()
+    except Exception as e:
+        logger.warning(f"Could not determine WSL adapter IP via netsh: {e}")
+    return None
+
 def is_valid_device_name(device_name: str) -> bool:
     if re.match(r'^\\\\\.\\PHYSICALDRIVE\d+$', device_name, re.IGNORECASE):
         return True
-    try:
-        if os.path.isfile(device_name):
-            return True
-    except Exception:
-        pass
     return False
 
 def get_physical_drive_index(device_name: str) -> Optional[int]:
@@ -109,12 +121,24 @@ def get_boot_and_pagefile_disk_indices() -> Set[int]:
     return indices
 
 def parse_connection(args):
+    bind_any = "--bind-any" in sys.argv
     if len(args) == 0:
         return None, 0
         
     if args[0] == "tcpserver":
         host = args[1]
         port = int(args[2])
+        if host == "0.0.0.0" and not bind_any:
+            wsl_ip = get_wsl_adapter_ip()
+            if wsl_ip:
+                logger.info(f"Overriding bind address 0.0.0.0 with WSL adapter IP {wsl_ip} for security. Use --bind-any to override.")
+                host = wsl_ip
+            else:
+                logger.warning("Could not find WSL adapter IP. Falling back to 127.0.0.1 for security. Use --bind-any to bind to 0.0.0.0.")
+                host = "127.0.0.1"
+        elif host == "0.0.0.0" and bind_any:
+            logger.warning("Binding to 0.0.0.0 (all interfaces) because --bind-any is enabled. This may expose the disk proxy to the local network!")
+            
         return connections.TcpServer(host, port), 3
 
     elif args[0] == "tcpclient":
@@ -142,6 +166,7 @@ def main():
     verbose = False
     log_file = None
     processes = []
+    bind_any = "--bind-any" in sys.argv
 
     i = 1
     while i < len(sys.argv):
@@ -164,6 +189,9 @@ def main():
 
         elif sys.argv[i] == "--allow-unsafe-boot-disk-writes":
             allow_unsafe_boot_disk_writes = True
+            i += 1
+
+        elif sys.argv[i] == "--bind-any":
             i += 1
             
         elif sys.argv[i] == "--log-file":
@@ -279,8 +307,10 @@ def main():
 
                     elif command == Command.READ:
                         index, pos, size = server_conn.unpack(FMT_READ_WRITE_POST_CMD)
+                        logger.info(f"READ request: index={index}, pos={pos}, size={size}")
                         if index < len(devices):
                             data = devices[index].read(pos, size)
+                            logger.info(f"READ result: type={type(data)}, len={len(data) if data is not None else 'None'}")
                         else:
                             logger.error("index out of range")
                             data = None
@@ -289,14 +319,22 @@ def main():
                             server_conn.pack("B", 1)
                         else:
                             server_conn.pack("B", 0)
+                            # Pad data to requested size to prevent client recv() hang at EOF
+                            if len(data) < size:
+                                data = bytes(data) + b'\x00' * (size - len(data))
                             server_conn.send(data)
 
                     elif command == Command.WRITE:
                         index, pos, size = server_conn.unpack(FMT_READ_WRITE_POST_CMD)
+                        logger.info(f"WRITE request: index={index}, pos={pos}, size={size}")
                         data = server_conn.recv(size)
-                        assert len(data) == size
+                        if len(data) != size:
+                            logger.error(f"Truncated WRITE payload: expected {size} bytes, received {len(data)} bytes")
+                            server_conn.pack("B", 1)
+                            continue
                         if index < len(devices):
                             res = devices[index].write(pos, data)
+                            logger.info(f"WRITE result: {res}")
                         else:
                             res = False
 

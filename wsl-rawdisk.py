@@ -123,29 +123,49 @@ async def loop_device_manager(devices: Dict[str, AsyncConnectedDevice], mountpoi
         logger.warning("not running as root, cannot create loop devices")
         return
 
-    # [FIX] Removed synchronous os.path.exists() to prevent FUSE self-deadlock.
-    # Yield to the event loop so pyfuse3.main() can initialize.
-    logger.info("Waiting 2.0s for FUSE mount to stabilize...")
-    await asyncio.sleep(2.0)
+    if devices:
+        test_file = os.path.join(mountpoint, next(iter(devices.values())).filename)
+        
+        def check_ready() -> bool:
+            start_time = time.time()
+            while time.time() - start_time < 10.0:
+                try:
+                    os.stat(test_file)
+                    return True
+                except Exception:
+                    time.sleep(0.1)
+            return False
+
+        logger.info(f"Waiting for FUSE mount readiness at {mountpoint}...")
+        loop = asyncio.get_running_loop()
+        is_ready = await loop.run_in_executor(None, check_ready)
+        if not is_ready:
+            logger.error(f"FUSE mount at {mountpoint} did not become ready within timeout.")
+            return
+        logger.info("FUSE mount is ready.")
+    else:
+        logger.warning("No devices registered; skipping FUSE readiness check.")
 
     for d in devices.values():
-        c = ["losetup", "-f", "--show", "-P", "--direct-io=on", os.path.join(mountpoint, d.filename)]
-        proc = await asyncio.create_subprocess_exec(
-            *c, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode == 0:
-            d.loop_dev = stdout.decode().rstrip("\n")
+        c = ["losetup", "-f", "--show", "--direct-io=on", os.path.join(mountpoint, d.filename)]
+        def run_losetup():
+            return subprocess.run(c, capture_output=True, text=True)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, run_losetup)
+        if res.returncode == 0:
+            d.loop_dev = res.stdout.strip()
             logger.info(f"Mapped {d.device_name} to {d.loop_dev}")
         else:
-            logger.error(f"Failed to map {d.device_name}: {stderr.decode()}")
+            logger.error(f"Failed to map {d.device_name}: {res.stderr}")
 
 async def cleanup_loop_devices(devices: Dict[str, AsyncConnectedDevice]):
     for d in devices.values():
         if d.loop_dev is not None:
             c = ["losetup", "-d", d.loop_dev]
-            proc = await asyncio.create_subprocess_exec(*c)
-            await proc.wait()
+            def run_cleanup():
+                return subprocess.run(c, capture_output=True)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, run_cleanup)
 async def main_async():
     parser = argparse.ArgumentParser(description="WSL RawDisk Proxy Client")
     parser.add_argument("drive", nargs="?", help="Drive number (e.g., '2' for PHYSICALDRIVE2) or full path")
@@ -161,13 +181,39 @@ async def main_async():
     mountpoint = os.path.abspath(tmp_mountpoint.name)
     
     def get_wsl_host_ip():
+        # 1. Try explicit config check for Mirrored Mode
+        try:
+            # Get Windows %USERPROFILE% via interop
+            res_cmd = subprocess.run(["/mnt/c/Windows/System32/cmd.exe", "/C", "echo %USERPROFILE%"], capture_output=True, text=True)
+            if res_cmd.returncode == 0:
+                win_path = res_cmd.stdout.strip()
+                # Convert to WSL path
+                res_wslpath = subprocess.run(["wslpath", "-u", win_path], capture_output=True, text=True)
+                if res_wslpath.returncode == 0:
+                    wsl_profile_path = res_wslpath.stdout.strip()
+                    wslconfig_path = os.path.join(wsl_profile_path, ".wslconfig")
+                    
+                    # Check for mirrored networking
+                    if os.path.isfile(wslconfig_path):
+                        with open(wslconfig_path, "r", encoding="utf-8") as f:
+                            config_text = f.read().lower().replace(" ", "")
+                            if "networkingmode=mirrored" in config_text:
+                                logger.info("Detected mirrored networking mode in .wslconfig. Using 127.0.0.1")
+                                return '127.0.0.1'
+        except Exception as e:
+            logger.debug(f"Could not read .wslconfig explicitly, falling back to routing table: {e}")
+
+        # 2. Fall back to NAT mode discovery via routing table
         try:
             result = subprocess.run(['ip', 'route'], capture_output=True, text=True)
             for line in result.stdout.split('\n'):
                 if line.startswith('default via'):
-                    return line.split()[2]
+                    nat_ip = line.split()[2]
+                    logger.info(f"Detected NAT networking mode. Using gateway IP: {nat_ip}")
+                    return nat_ip
         except Exception as e:
-            logger.warning(f"Could not determine WSL host IP, falling back to localhost: {e}")
+            logger.warning(f"Could not determine WSL host IP from routing table, falling back to localhost: {e}")
+        
         return '127.0.0.1'
 
     host = get_wsl_host_ip()
@@ -263,7 +309,7 @@ async def main_async():
         await conn.close()
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     asyncio.run(main_async())
 
 if __name__ == '__main__':

@@ -1,0 +1,2 @@
+# WSL-side requirements for wsl-rawdisk
+pyfuse3==3.4.0
