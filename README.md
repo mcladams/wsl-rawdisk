@@ -17,40 +17,54 @@ This version of `wsl-rawdisk` contains server-side validation and write authoriz
 
 * **Read-Only Mode (Safe):** By default, connections are read-only.
   ```bash
-  sudo python3 wsl-rawdisk.py 3
+  sudo uv run wsl-rawdisk 3
   ```
   *(Always use read-only unless write access is explicitly required)*
 
 * **Write Mode on Non-Boot Drives (Caution):** Allowed for external USB drives, offline disks, etc.
   ```bash
-  sudo python3 wsl-rawdisk.py 3 --allow-writes
+  sudo uv run wsl-rawdisk 3 --allow-writes
   ```
 
 * **Write Mode on Boot Disk (Blocked by Default):** Rejects write opens to the boot disk index (usually `0`).
   ```bash
-  sudo python3 wsl-rawdisk.py 0 --allow-writes  # Rejected by server
+  sudo uv run wsl-rawdisk 0 --allow-writes  # Rejected by server
   ```
   To permit writes to the boot/pagefile disk, the Windows server daemon must be started with the `--allow-unsafe-boot-disk-writes` flag. This opens a temporary **5-minute authorization window** from server startup:
   ```powershell
-  python wsl-rawdisk-server.py --allow-unsafe-boot-disk-writes
+  uv run wsl-rawdisk-server tcpserver 0.0.0.0 50000 --allow-unsafe-boot-disk-writes
   ```
   If write-open is not requested within 5 minutes of server startup, the override expires and the server rejects subsequent boot disk write opens.
 
-To start the app, extract the contents of the release package on the WSL side, then run:\
-sudo python3 wsl-rawdisk.py
+To install and start the app, install `uv` on both platforms:
 
-You can then access or mount the partitions on your system disk using /dev/loop0p1 or /dev/disk/by-*.
+### 🖥️ Windows Server Setup
+1. Sync dependencies for the server:
+   ```powershell
+   uv sync --extra server
+   ```
+2. Start the Windows-side server proxy:
+   ```powershell
+   uv run wsl-rawdisk-server tcpserver 0.0.0.0 50000 --allow-writes
+   ```
 
-In WSL, `pyfuse3` and `pyfuse3_asyncio` must be installed. For Ubuntu, this can be done using:
-sudo apt install python3-pyfuse3
+### 🐧 WSL Client Setup
+1. Sync dependencies for the client:
+   ```bash
+   uv sync --extra client
+   ```
+2. Run the client mapping:
+   ```bash
+   sudo uv run wsl-rawdisk <drive_number>
+   ```
 
-Use at own risk, destroying partition tables or system disk can lead to bricked system.\
-Windows will automatically write protect partitions already mounted in Windows.
+You can then access or mount the partitions on your system disk in WSL using `/dev/loop0p1` or `/dev/disk/by-*`.
 
-Tested on Windows 11 and WSL running Ubuntu 22.04
+Use at own risk; destroying partition tables or system disks can lead to a bricked system. Windows will automatically write protect partitions that are already mounted/active in Windows.
 
-The wsl-rawdisk-server.exe is included in the distribution package, but can be build on windows:\
-python3 -m venv\
-venv\Scripts\activate\
-pip install -r venv-win-requirements.txt\
-pyinstaller -F wsl-rawdisk-server.py
+Tested on Windows 11 and WSL running Ubuntu 26.04.
+
+To build the standalone Windows server executable:
+```powershell
+uv run pyinstaller -F src/wsl_rawdisk/server/__main__.py --name wsl-rawdisk-server
+```

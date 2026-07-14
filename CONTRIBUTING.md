@@ -6,6 +6,29 @@ Because this tool runs with elevated Windows privileges and manipulates physical
 
 By contributing to this repository, you agree to license your contributions under the project's [MIT License](https://gemini.google.com/LICENSE "null").
 
+## 📁 Project Structure & Setup
+
+`wsl-rawdisk` is organized using a standard Python `src-layout` and managed via `uv` with platform-specific optional dependencies (extras):
+
+- **src/wsl_rawdisk/server/**: The Windows host-side daemon that interacts with physical disk drives using `pywin32` and `WMI`. Dependencies: `[server]` extra.
+- **src/wsl_rawdisk/client/**: The WSL Linux guest-side daemon that interacts with `pyfuse3` to expose the disk proxy under a FUSE mount. Dependencies: `[client]` extra.
+- **src/wsl_rawdisk/common/**: Common connection structures shared between the client and server.
+- **src/wsl_rawdisk/protocol.py**: Defined protocol binary packet structures and constant identifiers.
+- **tests/**: The project test suite containing safety architecture unit tests and full-stack smoke tests.
+
+### 🛠️ Setting Up Your Development Environment
+
+1. Install `uv` on your host.
+2. Initialize and sync your platform-specific dependencies:
+   - On Windows (Server development):
+     ```powershell
+     uv sync --extra server --extra dev
+     ```
+   - On Linux/WSL (Client development):
+     ```bash
+     uv sync --extra client --extra dev
+     ```
+
 ## 🎯 Our Philosophy
 
 1. **Safety-First, Fail-Closed:** If an operation is not explicitly verified as safe, it must be refused. No speculative execution or silent fallbacks.
@@ -49,8 +72,8 @@ We do not accept pull requests that reduce test coverage or bypass safety valida
     
 - **Running Tests:** To run the safety suite prior to submitting a PR, execute:
     
-    ```
-    python -m unittest test_safety.py
+    ```bash
+    pytest tests/test_safety.py -v
     ```
     
 
@@ -64,6 +87,6 @@ Before submitting your Pull Request, ensure you can check off every item:
     
 - \[ \] All network structures in `protocol.py` use standard (`=`) alignment.
     
-- \[ \] The test suite (`test_safety.py`) runs and passes completely.
+- \[ \] The test suite (`tests/test_safety.py`) runs and passes completely.
     
 - \[ \] Any safety-adjacent changes are explicitly detailed in the PR description (never hide security or validation changes under a "clean up" or "refactor" commit).
