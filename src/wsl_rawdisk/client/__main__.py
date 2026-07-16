@@ -147,7 +147,7 @@ async def loop_device_manager(devices: Dict[str, AsyncConnectedDevice], mountpoi
         logger.warning("No devices registered; skipping FUSE readiness check.")
 
     for d in devices.values():
-        c = ["losetup", "-f", "--show", "--direct-io=on", os.path.join(mountpoint, d.filename)]
+        c = ["losetup", "-f", "--show", "-P", "--direct-io=on", os.path.join(mountpoint, d.filename)]
         def run_losetup():
             return subprocess.run(c, capture_output=True, text=True)
         loop = asyncio.get_running_loop()
